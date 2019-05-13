@@ -1,0 +1,11 @@
+{
+    "display_name": "Inter-Wallet Transfer",
+    "version": "1.0",
+    "description": "Plugin Inter-Wallet Transfer",
+    "project_url": "https://github.com/KarolTrzeszczkowski/Electron-Cash-Plugin-Inter-Wallet Transfer/",
+    "minimum_ec_version": "3.2",
+    "package_name": "inter-wallet-transfer",
+    "available_for": [
+        "qt"
+    ]
+}
