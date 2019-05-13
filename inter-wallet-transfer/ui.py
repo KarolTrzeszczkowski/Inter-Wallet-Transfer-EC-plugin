@@ -15,7 +15,7 @@ import time, datetime, random, threading, tempfile, string, os
 class LoadRWallet(QDialog, MessageBoxMixin):
     def __init__(self, parent, plugin, wallet_name):
         QDialog.__init__(self, parent)
-        self.file = 'tmp_wo_wallet'
+        self.file = 'tmp_wo_wallet'+''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
         try:
             os.remove(self.file)
         except:

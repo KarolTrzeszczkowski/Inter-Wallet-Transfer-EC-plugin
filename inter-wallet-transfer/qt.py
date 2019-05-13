@@ -1,6 +1,5 @@
-from PyQt5.QtGui import *
-from PyQt5.QtCore import *
-from PyQt5.QtWidgets import *
+from PyQt5 import QtGui
+
 import electroncash.version, os
 from electroncash.i18n import _
 from electroncash.plugins import BasePlugin, hook
@@ -23,12 +22,6 @@ class Plugin(BasePlugin):
 
     def description(self):
         return _("Plugin Inter-Wallet Transfer")
-
-    def is_available(self):
-        if self.is_version_compatible is None:
-            version = float(electroncash.version.PACKAGE_VERSION)
-            self.is_version_compatible = version >= MINIMUM_ELECTRON_CASH_VERSION
-        return True
 
 
     def on_close(self):
@@ -86,7 +79,7 @@ class Plugin(BasePlugin):
         tab = window.create_list_tab(l)
         self.lw_tabs[wallet_name] = tab
         self.lw_tab[wallet_name] = l
-        window.tabs.addTab(tab, QIcon(":icons/preferences.png"), _('Inter-Wallet Transfer'))
+        window.tabs.addTab(tab,  QtGui.QIcon(":icons/preferences.png"), _('Inter-Wallet Transfer'))
 
     def remove_ui_for_wallet(self, wallet_name, window):
 
@@ -115,7 +108,7 @@ class Plugin(BasePlugin):
 
             self.lw_tabs[wallet_name] = tab
             self.lw_tab[wallet_name] = l
-            window.tabs.addTab(tab, QIcon(":icons/preferences.png"), _('Inter-Wallet Transfer'))
+            window.tabs.addTab(tab,  QtGui.QIcon(":icons/preferences.png"), _('Inter-Wallet Transfer'))
             window.tabs.removeTab(i)
         except Exception as es:
             print(es)
