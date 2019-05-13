@@ -79,7 +79,7 @@ class Plugin(BasePlugin):
         tab = window.create_list_tab(l)
         self.lw_tabs[wallet_name] = tab
         self.lw_tab[wallet_name] = l
-        window.tabs.addTab(tab,  QtGui.QIcon("SP_MediaSeekForward"), _('Inter-Wallet Transfer'))
+        window.tabs.addTab(tab,  QtGui.QIcon(":icons/preferences.png"), _('Inter-Wallet Transfer'))
 
     def remove_ui_for_wallet(self, wallet_name, window):
 
