@@ -13,13 +13,12 @@ import time, datetime, random, threading, tempfile, string, os
 
 
 class LoadRWallet(QDialog, MessageBoxMixin):
-    def __init__(self, parent, plugin, wallet_name):
+
+    def __init__(self, parent, plugin, wallet_name, recipient_wallet=None, time=None, password=None):
         QDialog.__init__(self, parent)
-        self.file = 'tmp_wo_wallet'+''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
-        try:
-            os.remove(self.file)
-        except:
-            pass
+        self.password = password
+        name = '/tmp_wo_wallet'+''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
+        self.file = os.sep.join((tempfile.gettempdir(),name))
         self.tmp_pass = ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
         self.storage=None
         self.recipient_wallet=None
@@ -53,7 +52,7 @@ class LoadRWallet(QDialog, MessageBoxMixin):
         self.show_message("You should not be using either wallets during transfer. Leave Electron-cash active. "
                           "The plugin ceases operation and will have to be re-activated if Electron-cash "
                           "is stopped during the operation.")
-        self.plugin.switch_to(Transfer, self.wallet_name, self.recipient_wallet, int(self.time_e.text()), None)
+        self.plugin.switch_to(Transfer, self.wallet_name, self.recipient_wallet, int(self.time_e.text()), self.password)
 
 
     def transfer_changed(self):
@@ -113,6 +112,8 @@ class Transfer(QDialog, MessageBoxMixin):
 
     def __init__(self, parent, plugin, wallet_name, recipient_wallet, time, password):
         QDialog.__init__(self, parent)
+        self.wallet_name = wallet_name
+        self.plugin = plugin
         self.password = password
         self.main_window = parent
         self.wallet = parent.wallet
@@ -133,6 +134,9 @@ class Transfer(QDialog, MessageBoxMixin):
         self.setLayout(vbox)
         vbox.addWidget(self.tu)
         self.tu.on_update()
+        b = QPushButton(_("Abort"))
+        b.clicked.connect(self.abort)
+        vbox.addWidget(b)
         self.t = threading.Thread(target=self.send_all)
         self.breaker=False
         self.t.start()
@@ -153,6 +157,7 @@ class Transfer(QDialog, MessageBoxMixin):
                     return
             coin = self.utxos.pop(0)
             self.send_tx(coin)
+        self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None)
 
 
     def send_tx(self,coin):
@@ -165,6 +170,11 @@ class Transfer(QDialog, MessageBoxMixin):
         tx = Transaction.from_io(inputs, outputs, locktime=0)
         self.wallet.sign_transaction(tx, self.password)
         self.main_window.network.broadcast_transaction2(tx)
+
+    def abort(self):
+        self.breaker = True
+        self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None)
+
 
     def on_delete(self):
         pass
