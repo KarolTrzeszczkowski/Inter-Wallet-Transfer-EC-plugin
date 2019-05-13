@@ -9,19 +9,25 @@ from electroncash.wallet import Standard_Wallet
 from electroncash.storage import WalletStorage
 from electroncash_gui.qt.util import *
 from electroncash.transaction import Transaction,TYPE_ADDRESS
-from electroncash_gui.qt.transaction_dialog import show_transaction
-import time, datetime, random, threading
+import time, datetime, random, threading, tempfile, string, os
 
 
 class LoadRWallet(QDialog, MessageBoxMixin):
     def __init__(self, parent, plugin, wallet_name):
         QDialog.__init__(self, parent)
+        self.file = 'tmp_wo_wallet'
+        try:
+            os.remove(self.file)
+        except:
+            pass
+        self.tmp_pass = ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
         self.storage=None
         self.recipient_wallet=None
         self.keystore=None
         self.plugin = plugin
         self.network = parent.network
         self.wallet_name = wallet_name
+        self.keystore = None
         vbox = QVBoxLayout()
         self.setLayout(vbox)
         l = QLabel(_("Master Public Key") + " of the wallet you want to transfer your funds to:")
@@ -53,18 +59,18 @@ class LoadRWallet(QDialog, MessageBoxMixin):
     def transfer_changed(self):
         try:
             assert int(self.time_e.text()) >= 0
-            self.xpubkey= self.xpubkey_wid.text()
+            self.xpubkey = self.xpubkey_wid.text()
             self.keystore = keystore.from_master_key(self.xpubkey)
-        except Exception as ex:
-            print(ex)
+
+        except:
             self.transfer_button.setDisabled(True)
         else:
-            self.transfer_button.setDisabled(False)
-            self.storage = WalletStorage('/tmp/tmp_keystore')
+            self.storage = WalletStorage(self.file)
+            self.storage.set_password(self.tmp_pass, encrypt=True)
             self.storage.put('keystore', self.keystore.dump())
             self.recipient_wallet = Standard_Wallet(self.storage)
+            self.transfer_button.setDisabled(False)
             self.recipient_wallet.start_threads(self.network)
-            print(self.recipient_wallet)
 
 
 
@@ -147,8 +153,6 @@ class Transfer(QDialog, MessageBoxMixin):
                     return
             coin = self.utxos.pop(0)
             self.send_tx(coin)
-
-
 
 
     def send_tx(self,coin):
