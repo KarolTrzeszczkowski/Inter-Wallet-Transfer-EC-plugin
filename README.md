@@ -12,6 +12,9 @@ download the latest [release](https://github.com/KarolTrzeszczkowski/Inter-Walle
 
 At the top of Inter-Wallet Transfer tab you'll see the Master Public Key of the wallet you are looking at. To start transfer between the wallets paste Master Public Key of the wallet you want to transfer your funds to, select the time period for this transfer and hit "Transfer" button. A list of coins in this wallet will be displayed with a predicted, random time of transaction. 
 
+## Special thanks  
+I want to thank Imaginary_Username for funding the bounty for this plugin, and all the people that helped me with beta tests and code review, highlighting: Emergent_reasons, John Moriarty and NilacTheGrim.
+
 ## Donations
 If you wish to support development of this plugin or my work in general, consider a donation to the following address:
 
