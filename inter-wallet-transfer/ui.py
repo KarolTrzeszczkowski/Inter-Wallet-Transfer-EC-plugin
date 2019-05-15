@@ -17,6 +17,8 @@ class LoadRWallet(QDialog, MessageBoxMixin):
     def __init__(self, parent, plugin, wallet_name, recipient_wallet=None, time=None, password=None):
         QDialog.__init__(self, parent)
         self.password = password
+        self.wallet = parent.wallet
+        self.utxos = self.wallet.get_spendable_coins(None, parent.config)
         name = '/tmp_wo_wallet'+''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
         self.file = os.sep.join((tempfile.gettempdir(),name))
         self.tmp_pass = ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
@@ -29,6 +31,12 @@ class LoadRWallet(QDialog, MessageBoxMixin):
         self.keystore = None
         vbox = QVBoxLayout()
         self.setLayout(vbox)
+        self.local_xpub = self.wallet.get_master_public_keys()
+        l = QLabel(_("Master Public Key") + " of this wallet. It is used to generate all of your addresses.: ")
+        l2 = QLabel(self.local_xpub[0])
+        vbox.addWidget(l)
+        vbox.addWidget(l2)
+        l2.setTextInteractionFlags(Qt.TextSelectableByMouse)
         l = QLabel(_("Master Public Key") + " of the wallet you want to transfer your funds to:")
         vbox.addWidget(l)
         self.xpubkey=None
@@ -40,7 +48,12 @@ class LoadRWallet(QDialog, MessageBoxMixin):
         self.time_e = QLineEdit()
         self.time_e.setMaximumWidth(70)
         self.time_e.textEdited.connect(self.transfer_changed)
-        vbox.addWidget(self.time_e)
+        hbox = QHBoxLayout()
+        vbox.addLayout(hbox)
+        hbox.addWidget(self.time_e)
+        self.speed = QLabel()
+        hbox.addWidget(self.speed)
+        hbox.addStretch(1)
         self.transfer_button = QPushButton(_("Transfer"))
         self.transfer_button.clicked.connect(self.transfer)
         vbox.addWidget(self.transfer_button)
@@ -52,6 +65,11 @@ class LoadRWallet(QDialog, MessageBoxMixin):
         self.show_message("You should not be using either wallets during transfer. Leave Electron-cash active. "
                           "The plugin ceases operation and will have to be re-activated if Electron-cash "
                           "is stopped during the operation.")
+        self.storage = WalletStorage(self.file)
+        self.storage.set_password(self.tmp_pass, encrypt=True)
+        self.storage.put('keystore', self.keystore.dump())
+        self.recipient_wallet = Standard_Wallet(self.storage)
+        self.recipient_wallet.start_threads(self.network)
         self.plugin.switch_to(Transfer, self.wallet_name, self.recipient_wallet, int(self.time_e.text()), self.password)
 
 
@@ -60,17 +78,13 @@ class LoadRWallet(QDialog, MessageBoxMixin):
             assert int(self.time_e.text()) >= 0
             self.xpubkey = self.xpubkey_wid.text()
             self.keystore = keystore.from_master_key(self.xpubkey)
-
         except:
+            self.speed.setText('')
             self.transfer_button.setDisabled(True)
         else:
-            self.storage = WalletStorage(self.file)
-            self.storage.set_password(self.tmp_pass, encrypt=True)
-            self.storage.put('keystore', self.keystore.dump())
-            self.recipient_wallet = Standard_Wallet(self.storage)
             self.transfer_button.setDisabled(False)
-            self.recipient_wallet.start_threads(self.network)
-
+            v = len(self.utxos) / int(self.time_e.text())
+            self.speed.setText('{0:.2f}'.format(v)+' tx/h on average')
 
 
 class TransferringUTXO(MyTreeWidget, MessageBoxMixin):
@@ -82,7 +96,8 @@ class TransferringUTXO(MyTreeWidget, MessageBoxMixin):
             _('Time')
         ], None, deferred_updates=False)
         print("transferring utxo")
-        self.times=tab.times
+        now = time.time()
+        self.times = [ time.localtime(now + s) for s in tab.times ]
         self.utxos = tab.utxos
         self.main_window = parent
         self.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -102,7 +117,8 @@ class TransferringUTXO(MyTreeWidget, MessageBoxMixin):
         for i, u in enumerate(self.utxos):
             address = u['address'].to_ui_string()
             value = str(u['value'])
-            item = SortableTreeWidgetItem([address, value, str(datetime.timedelta(seconds=self.times[i+1]))])
+            item = SortableTreeWidgetItem([address, value, time.strftime('%H:%M',self.times[i+1])])
+            item.setData(2,Qt.UserRole+1,self.times[i+1])
             self.addChild(item)
 
 
@@ -117,6 +133,7 @@ class Transfer(QDialog, MessageBoxMixin):
         self.password = password
         self.main_window = parent
         self.wallet = parent.wallet
+
         if self.wallet.has_password():
             self.main_window.show_error(_(
                 "Inter-Wallet Transfer plugin requires the password. "
