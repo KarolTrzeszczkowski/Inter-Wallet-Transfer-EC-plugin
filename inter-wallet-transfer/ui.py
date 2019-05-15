@@ -75,7 +75,7 @@ class LoadRWallet(QDialog, MessageBoxMixin):
 
     def transfer_changed(self):
         try:
-            assert int(self.time_e.text()) >= 0
+            assert int(self.time_e.text()) > 0
             self.xpubkey = self.xpubkey_wid.text()
             self.keystore = keystore.from_master_key(self.xpubkey)
         except:
