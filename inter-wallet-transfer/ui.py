@@ -125,7 +125,7 @@ class TransferringUTXO(MyTreeWidget, MessageBoxMixin):
 
 
 class Transfer(QDialog, MessageBoxMixin):
-
+    switch_signal=pyqtSignal()
     def __init__(self, parent, plugin, wallet_name, recipient_wallet, time, password):
         QDialog.__init__(self, parent)
         self.wallet_name = wallet_name
@@ -154,8 +154,9 @@ class Transfer(QDialog, MessageBoxMixin):
         b = QPushButton(_("Abort"))
         b.clicked.connect(self.abort)
         vbox.addWidget(b)
-        self.t = threading.Thread(target=self.send_all)
+        self.t = threading.Thread(target=self.send_all,daemon=True)
         self.breaker=False
+        self.switch_signal.connect(lambda: self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None))
         self.t.start()
 
 
@@ -174,14 +175,13 @@ class Transfer(QDialog, MessageBoxMixin):
                     return
             coin = self.utxos.pop(0)
             self.send_tx(coin)
-        self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None)
-
+        self.switch_signal.emit()
 
     def send_tx(self,coin):
         self.wallet.add_input_info(coin)
         inputs = [coin]
         recpient_address = self.recipient_wallet.get_unused_address()
-        if (coin['value']-192) < 0:
+        if (coin['value']) < self.recipient_wallet.dust_treshold():
             return
         outputs = [(TYPE_ADDRESS, recpient_address, coin['value']-192)]
         tx = Transaction.from_io(inputs, outputs, locktime=0)
@@ -190,8 +190,7 @@ class Transfer(QDialog, MessageBoxMixin):
 
     def abort(self):
         self.breaker = True
-        self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None)
-
+        self.switch_signal.emit()
 
     def on_delete(self):
         pass
