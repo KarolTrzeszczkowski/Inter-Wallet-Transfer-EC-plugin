@@ -119,6 +119,7 @@ class TransferringUTXO(MyTreeWidget, MessageBoxMixin):
             value = str(u['value'])
             item = SortableTreeWidgetItem([address, value, time.strftime('%H:%M',self.times[i+1])])
             item.setData(2,Qt.UserRole+1,self.times[i+1])
+            item.setTextAlignment(1,Qt.AlignRight)
             self.addChild(item)
 
 
