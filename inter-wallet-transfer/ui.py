@@ -74,7 +74,7 @@ class LoadRWallet(MessageBoxMixin, PrintError, QDialog):
                 os.remove(file)
                 print_error("[InterWalletTransfer] Removed temp file", file)
             except Exception as e:
-                print_error("[InterWalletTransfer] Failed to removed temp file", file, "error: ", repr(e))
+                print_error("[InterWalletTransfer] Failed to remove temp file", file, "error: ", repr(e))
 
     def transfer(self):
         self.show_message("You should not be using either wallets during transfer. Leave Electron-cash active. "
