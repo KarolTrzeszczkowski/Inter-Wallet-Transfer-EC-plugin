@@ -9,10 +9,12 @@ from electroncash.wallet import Standard_Wallet
 from electroncash.storage import WalletStorage
 from electroncash_gui.qt.util import *
 from electroncash.transaction import Transaction,TYPE_ADDRESS
-import time, datetime, random, threading, tempfile, string, os
+from electroncash.util import PrintError, print_error
+import time, datetime, random, threading, tempfile, string, os, queue
+import weakref
 
 
-class LoadRWallet(QDialog, MessageBoxMixin):
+class LoadRWallet(MessageBoxMixin, PrintError, QDialog):
 
     def __init__(self, parent, plugin, wallet_name, recipient_wallet=None, time=None, password=None):
         QDialog.__init__(self, parent)
@@ -43,7 +45,7 @@ class LoadRWallet(QDialog, MessageBoxMixin):
         self.xpubkey_wid = QLineEdit()
         self.xpubkey_wid.textEdited.connect(self.transfer_changed)
         vbox.addWidget(self.xpubkey_wid)
-        l = QLabel(_("How long the transfer should take (in hours): "))
+        l = QLabel(_("How long the transfer should take (in whole hours): "))
         vbox.addWidget(l)
         self.time_e = QLineEdit()
         self.time_e.setMaximumWidth(70)
@@ -59,7 +61,20 @@ class LoadRWallet(QDialog, MessageBoxMixin):
         vbox.addWidget(self.transfer_button)
         self.transfer_button.setDisabled(True)
         vbox.addStretch(1)
+        # comment the below out if you want to disable auto-clean of temp file
+        # otherwise the temp file will be auto-cleaned on app exit or
+        # on this object's destruction
+        self._finalizer = weakref.finalize(self, self.delete_temp_wallet_file, self.file)
 
+    @staticmethod
+    def delete_temp_wallet_file(file):
+        ''' deletes the wallet file '''
+        if file and os.path.exists(file):
+            try:
+                os.remove(file)
+                print_error("[InterWalletTransfer] Removed temp file", file)
+            except Exception as e:
+                print_error("[InterWalletTransfer] Failed to removed temp file", file, "error: ", repr(e))
 
     def transfer(self):
         self.show_message("You should not be using either wallets during transfer. Leave Electron-cash active. "
@@ -116,7 +131,7 @@ class TransferringUTXO(MyTreeWidget, MessageBoxMixin):
         self.clear()
         for i, u in enumerate(self.utxos):
             address = u['address'].to_ui_string()
-            value = str(u['value'])
+            value = self.main_window.format_amount_and_units(u['value'])
             item = SortableTreeWidgetItem([address, value, time.strftime('%H:%M',self.times[i+1])])
             item.setData(2,Qt.UserRole+1,self.times[i+1])
             item.setTextAlignment(1,Qt.AlignRight)
@@ -125,8 +140,10 @@ class TransferringUTXO(MyTreeWidget, MessageBoxMixin):
 
 
 
-class Transfer(QDialog, MessageBoxMixin):
-    switch_signal=pyqtSignal()
+class Transfer(MessageBoxMixin, PrintError, QDialog):
+
+    switch_signal = pyqtSignal()
+
     def __init__(self, parent, plugin, wallet_name, recipient_wallet, time, password):
         QDialog.__init__(self, parent)
         self.wallet_name = wallet_name
@@ -155,9 +172,9 @@ class Transfer(QDialog, MessageBoxMixin):
         b = QPushButton(_("Abort"))
         b.clicked.connect(self.abort)
         vbox.addWidget(b)
-        self.t = threading.Thread(target=self.send_all,daemon=True)
-        self.breaker=False
-        self.switch_signal.connect(lambda: self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None))
+        self.switch_signal.connect(self.switch_signal_slot)
+        self.sleeper = queue.Queue()
+        self.t = threading.Thread(target=self.send_all, daemon=True)
         self.t.start()
 
 
@@ -169,29 +186,61 @@ class Transfer(QDialog, MessageBoxMixin):
         return distances, times
 
     def send_all(self):
+        ''' Runs in a thread '''
+        def wait(timeout=1.0) -> bool:
+            try:
+                self.sleeper.get(timeout=timeout)
+                # if we get here, we were notified to abort.
+                return False
+            except queue.Empty:
+                '''Normal course of events, we slept for 1.0 seconds'''
+                return True
         for i, t in enumerate(self.distances):
             for s in range(t):
-                time.sleep(1)
-                if self.breaker:
+                if not wait():
+                    # abort signalled
                     return
             coin = self.utxos.pop(0)
+            while not self.recipient_wallet.is_up_to_date():
+                ''' We must wait for the recipient wallet to finish synching...
+                Ugly hack.. :/ '''
+                self.print_error("Receiving wallet is not yet up to date... waiting... ")
+                if not wait(5.0):
+                    # abort signalled
+                    return
             self.send_tx(coin)
+        # Emit a signal which will end up calling switch_signal_slot
+        # in the main thread; we need to do this because we must now update
+        # the GUI, and we cannot update the GUI in non-main-thread
+        # See issue #10
         self.switch_signal.emit()
+
+    def switch_signal_slot(self):
+        ''' Runs in GUI (main) thread '''
+        self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None)
+
+    FEE = 192
 
     def send_tx(self,coin):
         self.wallet.add_input_info(coin)
         inputs = [coin]
         recpient_address = self.recipient_wallet.get_unused_address()
-        if (coin['value']) < self.recipient_wallet.dust_treshold():
+        if coin['value'] - self.FEE < self.recipient_wallet.dust_threshold():
             return
-        outputs = [(TYPE_ADDRESS, recpient_address, coin['value']-192)]
+        outputs = [(TYPE_ADDRESS, recpient_address, coin['value'] - self.FEE)]
         tx = Transaction.from_io(inputs, outputs, locktime=0)
         self.wallet.sign_transaction(tx, self.password)
         self.main_window.network.broadcast_transaction2(tx)
 
     def abort(self):
-        self.breaker = True
+        self.kill_join()
         self.switch_signal.emit()
+
+    def kill_join(self):
+        if self.t.is_alive():
+            self.sleeper.put(None)  # notify thread to wake up and exit
+            if threading.current_thread() is not self.t:
+                self.t.join(timeout=2.5)  # wait around a bit for it to die but give up if this takes too long
 
     def on_delete(self):
         pass
