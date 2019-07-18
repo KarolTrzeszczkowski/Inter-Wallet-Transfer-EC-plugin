@@ -193,7 +193,7 @@ class Transfer(MessageBoxMixin, PrintError, QDialog):
                 # if we get here, we were notified to abort.
                 return False
             except queue.Empty:
-                '''Normal course of events, we slept for 1.0 seconds'''
+                '''Normal course of events, we slept for timeout seconds'''
                 return True
         for i, t in enumerate(self.distances):
             for s in range(t):
