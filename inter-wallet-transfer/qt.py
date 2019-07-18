@@ -84,13 +84,13 @@ class Plugin(BasePlugin):
     def remove_ui_for_wallet(self, wallet_name, window):
 
         wallet_tab = self.lw_tabs.get(wallet_name, None)
-        self.lw_tab[wallet_name].breaker=True
         if wallet_tab is not None:
+            if callable(getattr(wallet_tab, 'kill_join', None)):
+                wallet_tab.kill_join()  # kill thread, wait for up to 2.5 seconds for it to exit
             del self.lw_tab[wallet_name]
             del self.lw_tabs[wallet_name]
             i = window.tabs.indexOf(wallet_tab)
             window.tabs.removeTab(i)
-
 
     def refresh_ui_for_wallet(self, wallet_name):
         wallet_tab = self.lw_tabs[wallet_name]
