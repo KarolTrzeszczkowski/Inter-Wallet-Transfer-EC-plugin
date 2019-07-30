@@ -8,10 +8,10 @@ from electroncash import keystore
 from electroncash.wallet import Standard_Wallet
 from electroncash.storage import WalletStorage
 from electroncash_gui.qt.util import *
-from electroncash.transaction import Transaction,TYPE_ADDRESS
-from electroncash.util import PrintError, print_error
+from electroncash.transaction import Transaction, TYPE_ADDRESS
+from electroncash.util import PrintError, print_error, age, Weak
 import time, datetime, random, threading, tempfile, string, os, queue
-import weakref
+from enum import IntEnum
 
 
 class LoadRWallet(MessageBoxMixin, PrintError, QDialog):
@@ -21,8 +21,14 @@ class LoadRWallet(MessageBoxMixin, PrintError, QDialog):
         self.password = password
         self.wallet = parent.wallet
         self.utxos = self.wallet.get_spendable_coins(None, parent.config)
-        name = '/tmp_wo_wallet'+''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
-        self.file = os.sep.join((tempfile.gettempdir(),name))
+        random.shuffle(self.utxos)  # randomize the coins' order
+        for x in range(10):
+            name = 'tmp_wo_wallet' + ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+            self.file = os.path.join(tempfile.gettempdir(), name)
+            if not os.path.exists(self.file):
+                break
+        else:
+            raise RuntimeError('Could not find a unique temp file in tmp directory', tempfile.gettempdir())
         self.tmp_pass = ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
         self.storage=None
         self.recipient_wallet=None
@@ -61,10 +67,6 @@ class LoadRWallet(MessageBoxMixin, PrintError, QDialog):
         vbox.addWidget(self.transfer_button)
         self.transfer_button.setDisabled(True)
         vbox.addStretch(1)
-        # comment the below out if you want to disable auto-clean of temp file
-        # otherwise the temp file will be auto-cleaned on app exit or
-        # on this object's destruction
-        self._finalizer = weakref.finalize(self, self.delete_temp_wallet_file, self.file)
 
     @staticmethod
     def delete_temp_wallet_file(file):
@@ -85,12 +87,15 @@ class LoadRWallet(MessageBoxMixin, PrintError, QDialog):
         self.storage.put('keystore', self.keystore.dump())
         self.recipient_wallet = Standard_Wallet(self.storage)
         self.recipient_wallet.start_threads(self.network)
-        self.plugin.switch_to(Transfer, self.wallet_name, self.recipient_wallet, int(self.time_e.text()), self.password)
-
+        # comment the below out if you want to disable auto-clean of temp file
+        # otherwise the temp file will be auto-cleaned on app exit or
+        # on the recepient_wallet object's destruction (when refct drops to 0)
+        Weak.finalize(self.recipient_wallet, self.delete_temp_wallet_file, self.file)
+        self.plugin.switch_to(Transfer, self.wallet_name, self.recipient_wallet, float(self.time_e.text()), self.password)
 
     def transfer_changed(self):
         try:
-            assert int(self.time_e.text()) > 0
+            assert float(self.time_e.text()) > 0
             self.xpubkey = self.xpubkey_wid.text()
             self.keystore = keystore.from_master_key(self.xpubkey)
         except:
@@ -98,54 +103,101 @@ class LoadRWallet(MessageBoxMixin, PrintError, QDialog):
             self.transfer_button.setDisabled(True)
         else:
             self.transfer_button.setDisabled(False)
-            v = len(self.utxos) / int(self.time_e.text())
+            v = len(self.utxos) / float(self.time_e.text())
             self.speed.setText('{0:.2f}'.format(v)+' tx/h on average')
 
 
-class TransferringUTXO(MyTreeWidget, MessageBoxMixin):
+class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
+
+    update_sig = pyqtSignal()
+
+    class DataRoles(IntEnum):
+        Time = Qt.UserRole+1
+        Name = Qt.UserRole+2
 
     def __init__(self, parent, tab):
         MyTreeWidget.__init__(self, parent, self.create_menu,[
             _('Address'),
             _('Amount'),
-            _('Time')
-        ], None, deferred_updates=False)
-        print("transferring utxo")
-        now = time.time()
-        self.times = [ time.localtime(now + s) for s in tab.times ]
-        self.utxos = tab.utxos
+            _('Time'),
+            _('When'),
+            _('Status'),
+        ], stretch_column=3, deferred_updates=True)
+        self.t0 = time.time()
+        self.tab = Weak.ref(tab)
+        self.print_error("transferring utxo")
+        self.utxos = list(tab.utxos)
         self.main_window = parent
-        self.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.setSortingEnabled(True)
-        self.sortByColumn(2, Qt.AscendingOrder)
+        self.setSelectionMode(QAbstractItemView.NoSelection)
+        self.setSortingEnabled(False)
+        self.sent_utxos = dict()
+        self.update_sig.connect(self.update)
+        self.monospace_font = QFont(MONOSPACE_FONT)
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(False)
+        self.timer.timeout.connect(self.update_sig)
+        self.timer.start(1000)
+        self.wallet = tab.recipient_wallet
 
     def create_menu(self, position):
         pass
 
-    def update(self):
-        if self.wallet and (not self.wallet.thread or not self.wallet.thread.isRunning()):
-            return
-        super().update()
+    @staticmethod
+    def get_name(utxo) -> str:
+        return "{}:{}".format(utxo['prevout_hash'], utxo['prevout_n'])
+
+    @staticmethod
+    def _get_check_icon() -> QIcon:
+        if QFile.exists(":icons/confirmed.png"):
+            # old EC version
+            return QIcon(":icons/confirmed.png")
+        else:
+            # newer EC version
+            return QIcon(":icons/confirmed.svg")
 
     def on_update(self):
         self.clear()
+        tab = self.tab()
+        if not tab or not self.wallet:
+            return
+        now = self.t0  # t0 is updated by thread as the actual start time
+        times = [ time.localtime(now + s) for s in tab.times ]
+        times_secs = tab.times
+        check_icon = self._get_check_icon()
         for i, u in enumerate(self.utxos):
             address = u['address'].to_ui_string()
-            value = self.main_window.format_amount_and_units(u['value'])
-            item = SortableTreeWidgetItem([address, value, time.strftime('%H:%M',self.times[i+1])])
-            item.setData(2,Qt.UserRole+1,self.times[i+1])
-            item.setTextAlignment(1,Qt.AlignRight)
+            value = self.main_window.format_amount(u['value'], whitespaces=True) + " " + self.main_window.base_unit()
+            name = self.get_name(u)
+            ts = self.sent_utxos.get(name)
+            is_sent = ts is not None
+            if is_sent:
+                status = _("Sent")
+                when = age(ts, include_seconds=True)
+            else:
+                status = _("Queued")
+                when = age(max(self.t0 + times_secs[i], time.time()+1.0), include_seconds=True)
+
+
+            item = SortableTreeWidgetItem([address, value, time.strftime('%H:%M', times[i]), when, status])
+            item.setFont(0, self.monospace_font)
+            item.setFont(1, self.monospace_font)
+            item.setTextAlignment(1, Qt.AlignLeft)
+            if is_sent:
+                item.setIcon(4, check_icon)
+            item.setData(0, self.DataRoles.Time, times[i])
+            item.setData(0, self.DataRoles.Name, name)
             self.addChild(item)
 
 
 
 
-class Transfer(MessageBoxMixin, PrintError, QDialog):
+class Transfer(MessageBoxMixin, PrintError, QWidget):
 
     switch_signal = pyqtSignal()
+    set_label_signal = pyqtSignal(str, str)
 
-    def __init__(self, parent, plugin, wallet_name, recipient_wallet, time, password):
-        QDialog.__init__(self, parent)
+    def __init__(self, parent, plugin, wallet_name, recipient_wallet, hours, password):
+        QWidget.__init__(self, parent)
         self.wallet_name = wallet_name
         self.plugin = plugin
         self.password = password
@@ -163,27 +215,28 @@ class Transfer(MessageBoxMixin, PrintError, QDialog):
         self.recipient_wallet = recipient_wallet
         self.utxos = self.wallet.get_spendable_coins(None, parent.config)
         random.shuffle(self.utxos)
-        self.distances, self.times = self.delta(time)
+        self.times = self.randomize_times(hours)
         self.tu = TransferringUTXO(parent, self)
         vbox = QVBoxLayout()
         self.setLayout(vbox)
         vbox.addWidget(self.tu)
-        self.tu.on_update()
+        self.tu.update()
         b = QPushButton(_("Abort"))
         b.clicked.connect(self.abort)
         vbox.addWidget(b)
         self.switch_signal.connect(self.switch_signal_slot)
+        self.set_label_signal.connect(self.set_label_slot)
         self.sleeper = queue.Queue()
         self.t = threading.Thread(target=self.send_all, daemon=True)
         self.t.start()
 
-
-    def delta(self, time):
-        times = [random.randint(0,time*3600) for t in range(len(self.utxos))]
-        times.insert(0,0)
+    def randomize_times(self, hours):
+        times = [random.randint(0,int(hours*3600)) for t in range(len(self.utxos))]
+        times.insert(0, 0)  # first time is always immediate
         times.sort()
-        distances = [times[i+1]-times[i] for i in range(len(times)-1)]
-        return distances, times
+        del times[-1]  # since we inserted 0 at the beginning
+        assert len(times) == len(self.utxos)
+        return times
 
     def send_all(self):
         ''' Runs in a thread '''
@@ -195,9 +248,12 @@ class Transfer(MessageBoxMixin, PrintError, QDialog):
             except queue.Empty:
                 '''Normal course of events, we slept for timeout seconds'''
                 return True
-        for i, t in enumerate(self.distances):
-            for s in range(t):
-                if not wait():
+        self.tu.t0 = t0 = time.time()
+        for i, t in enumerate(self.times):
+            def time_left():
+                return (t0 + t) - time.time()
+            while time_left() > 0.0:
+                if not wait(max(0.0, time_left())):  # wait for "time left" seconds
                     # abort signalled
                     return
             coin = self.utxos.pop(0)
@@ -209,14 +265,27 @@ class Transfer(MessageBoxMixin, PrintError, QDialog):
                     # abort signalled
                     return
             self.send_tx(coin)
+            self.tu.sent_utxos[self.tu.get_name(coin)] = time.time()
+            self.tu.update_sig.emit()
         # Emit a signal which will end up calling switch_signal_slot
         # in the main thread; we need to do this because we must now update
         # the GUI, and we cannot update the GUI in non-main-thread
         # See issue #10
         self.switch_signal.emit()
 
+    def clean_up(self):
+        if self.recipient_wallet:
+            self.recipient_wallet.stop_threads()
+        self.tu.wallet = None
+        self.recipient_wallet = None
+        if self.tu.timer:
+            self.tu.timer.stop()
+            self.tu.timer.deleteLater()
+            self.tu.timer = None
+
     def switch_signal_slot(self):
         ''' Runs in GUI (main) thread '''
+        self.clean_up()
         self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None)
 
     FEE = 192
@@ -230,7 +299,16 @@ class Transfer(MessageBoxMixin, PrintError, QDialog):
         outputs = [(TYPE_ADDRESS, recpient_address, coin['value'] - self.FEE)]
         tx = Transaction.from_io(inputs, outputs, locktime=0)
         self.wallet.sign_transaction(tx, self.password)
+        self.set_label_signal.emit(tx.txid(),
+            _("Inter-Wallet Transfer {amount} -> {address}").format(
+                amount = self.main_window.format_amount(coin['value']) + " " + self.main_window.base_unit(),
+                address = recpient_address.to_ui_string()
+        ))
         self.main_window.network.broadcast_transaction2(tx)
+
+    def set_label_slot(self, txid: str, label: str):
+        ''' Runs in GUI (main) thread '''
+        self.wallet.set_label(txid, label)
 
     def abort(self):
         self.kill_join()
