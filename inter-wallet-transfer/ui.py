@@ -144,6 +144,8 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
         self.sent_utxos = dict()
         self.failed_utxos = dict()
         self.sending = None
+        self.check_icon = self._get_check_icon()
+        self.fail_icon = self._get_fail_icon()
         self.update_sig.connect(self.update)
         self.monospace_font = QFont(MONOSPACE_FONT)
         self.italic_font = QFont(); self.italic_font.setItalic(True)
@@ -187,8 +189,6 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
         if not tab or not self.wallet:
             return
         self._recalc_times(tab.times)
-        check_icon = self._get_check_icon()
-        fail_icon = self._get_fail_icon()
         base_unit = self.main_window.base_unit()
         for i, u in enumerate(self.utxos):
             address = u['address'].to_ui_string()
@@ -202,13 +202,13 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
             if is_sent:
                 status = _("Sent")
                 when = age(ts, include_seconds=True)
-                icon = check_icon
+                icon = self.check_icon
             else:
                 failed_reason = self.failed_utxos.get(name)
                 if failed_reason:
                     status = _("Failed")
                     when = failed_reason
-                    icon = fail_icon
+                    icon = self.fail_icon
                     when_font = self.italic_font
                 elif name == self.sending:
                     status = _("Processing")
@@ -216,7 +216,7 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
                     when_font = self.italic_font
                 else:
                     status = _("Queued")
-                    when = age(max(self.t0 + self.times_secs[i], time.time()+1.0), include_seconds=True)
+                    when = age(max(self.t0 + self.times_secs[i], time.time()+0.5), include_seconds=True)
 
             item = SortableTreeWidgetItem([address, value, time.strftime('%H:%M', self.times[i]), when, status])
             item.setFont(0, self.monospace_font)
@@ -337,7 +337,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
 
     def send_tx(self, coin: dict) -> str:
         ''' Returns the failure reason as a string on failure, or 'None'
-         on success. '''
+        on success. '''
         self.wallet.add_input_info(coin)
         inputs = [coin]
         recipient_address = self.recipient_wallet and self.recipient_wallet.get_unused_address()
