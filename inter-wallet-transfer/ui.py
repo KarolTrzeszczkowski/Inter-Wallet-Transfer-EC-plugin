@@ -152,7 +152,7 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
         self.timer = QTimer(self)
         self.timer.setSingleShot(False)
         self.timer.timeout.connect(self.update_sig)
-        self.timer.start(1000)
+        self.timer.start(2000)  # update every 2 seconds since the granularity of our "When" column is ~5 seconds
         self.wallet = tab.recipient_wallet
 
     def create_menu(self, position):
@@ -300,6 +300,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
             coin = self.utxos.pop(0)
             name = get_name(coin)
             self.tu.sending = name
+            self.tu.update_sig.emit()  # have the widget immediately display "Processing"
             while not self.recipient_wallet.is_up_to_date():
                 ''' We must wait for the recipient wallet to finish synching...
                 Ugly hack.. :/ '''
@@ -313,7 +314,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
             else:
                 self.tu.failed_utxos[name] = err
             self.tu.sending = None
-            self.tu.update_sig.emit()
+            self.tu.update_sig.emit()  # have the widget immediately show "Sent or "Failed"
         # Emit a signal which will end up calling switch_signal_slot
         # in the main thread; we need to do this because we must now update
         # the GUI, and we cannot update the GUI in non-main-thread
