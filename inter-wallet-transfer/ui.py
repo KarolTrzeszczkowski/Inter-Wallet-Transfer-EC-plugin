@@ -86,9 +86,9 @@ class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
                 print_error("[InterWalletTransfer] Failed to remove temp file", file, "error: ", repr(e))
 
     def transfer(self):
-        self.show_message("You should not be using either wallets during transfer. Leave Electron-cash active. "
-                          "The plugin ceases operation and will have to be re-activated if Electron-cash "
-                          "is stopped during the operation.")
+        self.show_message(_("You should not use either wallet during the transfer. Leave Electron Cash active. "
+                            "The plugin ceases operation and will have to be re-activated if Electron Cash "
+                            "is stopped during the operation."))
         self.storage = WalletStorage(self.file)
         self.storage.set_password(self.tmp_pass, encrypt=True)
         self.storage.put('keystore', self.keystore.dump())
@@ -209,11 +209,7 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
             item.setTextAlignment(1, Qt.AlignLeft)
             if icon:
                 item.setIcon(4, icon)
-            item.setData(0, self.DataRoles.Time, times[i])
-            item.setData(0, self.DataRoles.Name, name)
             self.addChild(item)
-
-
 
 
 class Transfer(MessageBoxMixin, PrintError, QWidget):
@@ -255,6 +251,9 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         self.t = threading.Thread(target=self.send_all, daemon=True)
         self.t.start()
 
+    def diagnostic_name(self):
+        return "InterWalletTransfer.Transfer"
+
     def randomize_times(self, hours):
         times = [random.randint(0,int(hours*3600)) for t in range(len(self.utxos))]
         times.insert(0, 0)  # first time is always immediate
@@ -285,7 +284,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
             while not self.recipient_wallet.is_up_to_date():
                 ''' We must wait for the recipient wallet to finish synching...
                 Ugly hack.. :/ '''
-                self.print_error("Receiving wallet is not yet up to date... waiting... ")
+                self.print_error("Receiving wallet is not yet up-to-date... waiting... ")
                 if not wait(5.0):
                     # abort signalled
                     return
@@ -315,27 +314,32 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         self.clean_up()
         self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None)
 
-    def send_tx(self,coin):
+    def send_tx(self, coin: dict) -> bool:
         self.wallet.add_input_info(coin)
         inputs = [coin]
-        recpient_address = self.recipient_wallet.get_unused_address()
-        outputs = [(TYPE_ADDRESS, recpient_address, coin['value'])]
+        recipient_address = self.recipient_wallet and self.recipient_wallet.get_unused_address()
+        if not recipient_address:
+            self.print_error("Could not get recipient_address; recipient wallet may have been cleaned up, aborting send_tx")
+            return False
+        outputs = [(recipient_address.kind, recipient_address, coin['value'])]
         kwargs = {}
         if hasattr(self.wallet, 'is_schnorr_enabled'):
+            # This EC version has Schnorr, query the flag
             kwargs['sign_schnorr'] = self.wallet.is_schnorr_enabled()
         # create the tx once to get a fee from the size
         tx = Transaction.from_io(inputs, outputs, locktime=self.wallet.get_local_height(), **kwargs)
         fee = tx.estimated_size()
-        if coin['value'] - fee < self.recipient_wallet.dust_threshold():
+        if coin['value'] - fee < self.wallet.dust_threshold():
+            self.print_error("Resulting output value is below dust threshold, aborting send_tx")
             return False
         # create the tx again, this time with the real fee
-        outputs = [(TYPE_ADDRESS, recpient_address, coin['value'] - fee)]
+        outputs = [(recipient_address.kind, recipient_address, coin['value'] - fee)]
         tx = Transaction.from_io(inputs, outputs, locktime=self.wallet.get_local_height(), **kwargs)
         self.wallet.sign_transaction(tx, self.password)
         self.set_label_signal.emit(tx.txid(),
             _("Inter-Wallet Transfer {amount} -> {address}").format(
                 amount = self.main_window.format_amount(coin['value']) + " " + self.main_window.base_unit(),
-                address = recpient_address.to_ui_string()
+                address = recipient_address.to_ui_string()
         ))
         try:
             self.main_window.network.broadcast_transaction2(tx)
