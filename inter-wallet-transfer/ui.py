@@ -13,6 +13,8 @@ from electroncash.util import PrintError, print_error, age, Weak
 import time, datetime, random, threading, tempfile, string, os, queue
 from enum import IntEnum
 
+def get_name(utxo) -> str:
+    return "{}:{}".format(utxo['prevout_hash'], utxo['prevout_n'])
 
 class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
 
@@ -130,17 +132,21 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
             _('When'),
             _('Status'),
         ], stretch_column=3, deferred_updates=True)
-        self.t0 = time.time()
         self.tab = Weak.ref(tab)
+        self.t0 = time.time()
+        self.t0_last = None
+        self._recalc_times(tab.times)
         self.print_error("transferring utxo")
         self.utxos = list(tab.utxos)
         self.main_window = parent
         self.setSelectionMode(QAbstractItemView.NoSelection)
         self.setSortingEnabled(False)
         self.sent_utxos = dict()
-        self.failed_utxos = set()
+        self.failed_utxos = dict()
+        self.sending = None
         self.update_sig.connect(self.update)
         self.monospace_font = QFont(MONOSPACE_FONT)
+        self.italic_font = QFont(); self.italic_font.setItalic(True)
         self.timer = QTimer(self)
         self.timer.setSingleShot(False)
         self.timer.timeout.connect(self.update_sig)
@@ -149,10 +155,6 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
 
     def create_menu(self, position):
         pass
-
-    @staticmethod
-    def get_name(utxo) -> str:
-        return "{}:{}".format(utxo['prevout_hash'], utxo['prevout_n'])
 
     @staticmethod
     def _get_check_icon() -> QIcon:
@@ -172,43 +174,58 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
             # future EC version
             return QIcon(":icons/warning.svg")
 
+    def _recalc_times(self, times):
+        if self.t0_last != self.t0:
+            now = self.t0  # t0 is updated by thread as the actual start time
+            self.times = [ time.localtime(now + s) for s in times ]
+            self.times_secs = times
+            self.t0_last = now
+
     def on_update(self):
         self.clear()
         tab = self.tab()
         if not tab or not self.wallet:
             return
-        now = self.t0  # t0 is updated by thread as the actual start time
-        times = [ time.localtime(now + s) for s in tab.times ]
-        times_secs = tab.times
+        self._recalc_times(tab.times)
         check_icon = self._get_check_icon()
         fail_icon = self._get_fail_icon()
+        base_unit = self.main_window.base_unit()
         for i, u in enumerate(self.utxos):
             address = u['address'].to_ui_string()
-            value = self.main_window.format_amount(u['value'], whitespaces=True) + " " + self.main_window.base_unit()
-            name = self.get_name(u)
+            value = self.main_window.format_amount(u['value'], whitespaces=True) + " " + base_unit
+            name = get_name(u)
             ts = self.sent_utxos.get(name)
-            is_sent = ts is not None
             icon = None
+            when_font = None
+            when = ''
+            is_sent = ts is not None
             if is_sent:
                 status = _("Sent")
                 when = age(ts, include_seconds=True)
                 icon = check_icon
             else:
-                if name in self.failed_utxos:
+                failed_reason = self.failed_utxos.get(name)
+                if failed_reason:
                     status = _("Failed")
-                    when = "--"
+                    when = failed_reason
                     icon = fail_icon
+                    when_font = self.italic_font
+                elif name == self.sending:
+                    status = _("Processing")
+                    when = status + " ..."
+                    when_font = self.italic_font
                 else:
                     status = _("Queued")
-                    when = age(max(self.t0 + times_secs[i], time.time()+1.0), include_seconds=True)
+                    when = age(max(self.t0 + self.times_secs[i], time.time()+1.0), include_seconds=True)
 
-
-            item = SortableTreeWidgetItem([address, value, time.strftime('%H:%M', times[i]), when, status])
+            item = SortableTreeWidgetItem([address, value, time.strftime('%H:%M', self.times[i]), when, status])
             item.setFont(0, self.monospace_font)
             item.setFont(1, self.monospace_font)
             item.setTextAlignment(1, Qt.AlignLeft)
             if icon:
                 item.setIcon(4, icon)
+            if when_font:
+                item.setFont(3, when_font)
             self.addChild(item)
 
 
@@ -281,6 +298,8 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
                     # abort signalled
                     return
             coin = self.utxos.pop(0)
+            name = get_name(coin)
+            self.tu.sending = name
             while not self.recipient_wallet.is_up_to_date():
                 ''' We must wait for the recipient wallet to finish synching...
                 Ugly hack.. :/ '''
@@ -288,10 +307,12 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
                 if not wait(5.0):
                     # abort signalled
                     return
-            if self.send_tx(coin):
-                self.tu.sent_utxos[self.tu.get_name(coin)] = time.time()
+            err = self.send_tx(coin)
+            if not err:
+                self.tu.sent_utxos[name] = time.time()
             else:
-                self.tu.failed_utxos.add(self.tu.get_name(coin))
+                self.tu.failed_utxos[name] = err
+            self.tu.sending = None
             self.tu.update_sig.emit()
         # Emit a signal which will end up calling switch_signal_slot
         # in the main thread; we need to do this because we must now update
@@ -314,13 +335,15 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         self.clean_up()
         self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None)
 
-    def send_tx(self, coin: dict) -> bool:
+    def send_tx(self, coin: dict) -> str:
+        ''' Returns the failure reason as a string on failure, or 'None'
+         on success. '''
         self.wallet.add_input_info(coin)
         inputs = [coin]
         recipient_address = self.recipient_wallet and self.recipient_wallet.get_unused_address()
         if not recipient_address:
             self.print_error("Could not get recipient_address; recipient wallet may have been cleaned up, aborting send_tx")
-            return False
+            return _("Unspecified failure")
         outputs = [(recipient_address.kind, recipient_address, coin['value'])]
         kwargs = {}
         if hasattr(self.wallet, 'is_schnorr_enabled'):
@@ -331,7 +354,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         fee = tx.estimated_size()
         if coin['value'] - fee < self.wallet.dust_threshold():
             self.print_error("Resulting output value is below dust threshold, aborting send_tx")
-            return False
+            return _("Too small")
         # create the tx again, this time with the real fee
         outputs = [(recipient_address.kind, recipient_address, coin['value'] - fee)]
         tx = Transaction.from_io(inputs, outputs, locktime=self.wallet.get_local_height(), **kwargs)
@@ -345,8 +368,8 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
             self.main_window.network.broadcast_transaction2(tx)
         except Exception as e:
             self.print_error("Error broadcasting tx:", repr(e))
-            return False
-        return True
+            return (e.args and e.args[0]) or _("Unspecified failure")
+        return None
 
     def set_label_slot(self, txid: str, label: str):
         ''' Runs in GUI (main) thread '''
