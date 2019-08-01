@@ -7,9 +7,10 @@ from electroncash_gui.qt.util import MessageBoxMixin, MyTreeWidget
 from electroncash import keystore
 from electroncash.wallet import Standard_Wallet
 from electroncash.storage import WalletStorage
+from electroncash.keystore import Hardware_KeyStore
 from electroncash_gui.qt.util import *
 from electroncash.transaction import Transaction, TYPE_ADDRESS
-from electroncash.util import PrintError, print_error, age, Weak
+from electroncash.util import PrintError, print_error, age, Weak, InvalidPassword
 import time, datetime, random, threading, tempfile, string, os, queue
 from enum import IntEnum
 
@@ -48,16 +49,26 @@ class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
         vbox.addWidget(l2)
         l2.setTextInteractionFlags(Qt.TextSelectableByMouse)
         l = QLabel(_("Master Public Key") + " of the wallet you want to transfer your funds to:")
+        disabled = False
+        if self.wallet.is_watching_only():
+            l.setText(_("This wallet is <b>watching-only</b> and cannot be used as a transfer source."))
+            disabled = True
+        elif any([isinstance(k, Hardware_KeyStore) for k in self.wallet.get_keystores()]):
+            l.setText(_("This wallet is a <b>hardware wallet</b> and cannot be used as a transfer source."))
+            disabled = True
         vbox.addWidget(l)
         self.xpubkey=None
         self.xpubkey_wid = QLineEdit()
         self.xpubkey_wid.textEdited.connect(self.transfer_changed)
+        self.xpubkey_wid.setDisabled(disabled)
         vbox.addWidget(self.xpubkey_wid)
         l = QLabel(_("How long the transfer should take (in whole hours): "))
         vbox.addWidget(l)
+        l.setDisabled(disabled)
         self.time_e = QLineEdit()
         self.time_e.setMaximumWidth(70)
         self.time_e.textEdited.connect(self.transfer_changed)
+        self.time_e.setDisabled(disabled)
         hbox = QHBoxLayout()
         vbox.addLayout(hbox)
         hbox.addWidget(self.time_e)
@@ -68,6 +79,7 @@ class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
         self.transfer_button.clicked.connect(self.transfer)
         vbox.addWidget(self.transfer_button)
         self.transfer_button.setDisabled(True)
+
         vbox.addStretch(1)
 
     def showEvent(self, e):
@@ -241,16 +253,28 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         self.password = password
         self.main_window = parent
         self.wallet = parent.wallet
+        self.recipient_wallet = recipient_wallet
+
+        user_cancel = False
 
         if self.wallet.has_password():
             self.main_window.show_error(_(
                 "Inter-Wallet Transfer plugin requires the password. "
                 "It will be sending transactions from this wallet at a random time without asking for confirmation."))
-            self.password = self.main_window.password_dialog()
-            if not self.password:
-                return
+            while True:
+                # keep trying the password until it succeeds
+                self.password = self.main_window.password_dialog()
+                if not self.password:
+                    # user cancel
+                    user_cancel = True
+                    break
+                try:
+                    self.wallet.check_password(self.password)
+                except InvalidPassword as e:
+                    self.show_warning(str(e))
+                    continue
+                break
 
-        self.recipient_wallet = recipient_wallet
         self.utxos = self.wallet.get_spendable_coins(None, parent.config)
         random.shuffle(self.utxos)
         self.times = self.randomize_times(hours)
@@ -265,8 +289,14 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         self.switch_signal.connect(self.switch_signal_slot)
         self.set_label_signal.connect(self.set_label_slot)
         self.sleeper = queue.Queue()
-        self.t = threading.Thread(target=self.send_all, daemon=True)
-        self.t.start()
+        if not user_cancel:
+            self.t = threading.Thread(target=self.send_all, daemon=True)
+            self.t.start()
+        else:
+            self.t = None
+            self.setDisabled(True)
+            # fire the switch signal as soon as we return to the event loop
+            QTimer.singleShot(0, self.switch_signal)
 
     def diagnostic_name(self):
         return "InterWalletTransfer.Transfer"
@@ -324,12 +354,13 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
     def clean_up(self):
         if self.recipient_wallet:
             self.recipient_wallet.stop_threads()
-        self.tu.wallet = None
         self.recipient_wallet = None
-        if self.tu.timer:
-            self.tu.timer.stop()
-            self.tu.timer.deleteLater()
-            self.tu.timer = None
+        if self.tu:
+            self.tu.wallet = None
+            if self.tu.timer:
+                self.tu.timer.stop()
+                self.tu.timer.deleteLater()
+                self.tu.timer = None
 
     def switch_signal_slot(self):
         ''' Runs in GUI (main) thread '''
@@ -359,7 +390,13 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         # create the tx again, this time with the real fee
         outputs = [(recipient_address.kind, recipient_address, coin['value'] - fee)]
         tx = Transaction.from_io(inputs, outputs, locktime=self.wallet.get_local_height(), **kwargs)
-        self.wallet.sign_transaction(tx, self.password)
+        try:
+            self.wallet.sign_transaction(tx, self.password)
+        except InvalidPassword as e:
+            return str(e)
+        except Exception as e:
+            return _("Unspecified failure")
+
         self.set_label_signal.emit(tx.txid(),
             _("Inter-Wallet Transfer {amount} -> {address}").format(
                 amount = self.main_window.format_amount(coin['value']) + " " + self.main_window.base_unit(),
@@ -381,7 +418,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         self.switch_signal.emit()
 
     def kill_join(self):
-        if self.t.is_alive():
+        if self.t and self.t.is_alive():
             self.sleeper.put(None)  # notify thread to wake up and exit
             if threading.current_thread() is not self.t:
                 self.t.join(timeout=2.5)  # wait around a bit for it to die but give up if this takes too long
