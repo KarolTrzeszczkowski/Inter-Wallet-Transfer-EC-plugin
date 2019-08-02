@@ -244,6 +244,7 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
 class Transfer(MessageBoxMixin, PrintError, QWidget):
 
     switch_signal = pyqtSignal()
+    done_signal = pyqtSignal(str)
     set_label_signal = pyqtSignal(str, str)
 
     def __init__(self, parent, plugin, wallet_name, recipient_wallet, hours, password):
@@ -255,27 +256,29 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         self.wallet = parent.wallet
         self.recipient_wallet = recipient_wallet
 
-        user_cancel = False
+        cancel = False
 
-        if self.wallet.has_password():
+        self.utxos = self.wallet.get_spendable_coins(None, parent.config)
+        if not self.utxos:
+            self.main_window.show_message(_("No coins were found in this wallet; cannot proceed with transfer."))
+            cancel = True
+        elif self.wallet.has_password():
             self.main_window.show_error(_(
                 "Inter-Wallet Transfer plugin requires the password. "
                 "It will be sending transactions from this wallet at a random time without asking for confirmation."))
             while True:
-                # keep trying the password until it succeeds
+                # keep trying the password until it's valid or user cancels
                 self.password = self.main_window.password_dialog()
                 if not self.password:
                     # user cancel
-                    user_cancel = True
+                    cancel = True
                     break
                 try:
                     self.wallet.check_password(self.password)
+                    break  # password was good, break out of loop
                 except InvalidPassword as e:
-                    self.show_warning(str(e))
-                    continue
-                break
+                    self.show_warning(str(e))  # show error, keep looping
 
-        self.utxos = self.wallet.get_spendable_coins(None, parent.config)
         random.shuffle(self.utxos)
         self.times = self.randomize_times(hours)
         self.tu = TransferringUTXO(parent, self)
@@ -283,13 +286,14 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         self.setLayout(vbox)
         vbox.addWidget(self.tu)
         self.tu.update()
-        b = QPushButton(_("Abort"))
+        self.abort_but = b = QPushButton(_("Abort"))
         b.clicked.connect(self.abort)
         vbox.addWidget(b)
         self.switch_signal.connect(self.switch_signal_slot)
+        self.done_signal.connect(self.done_slot)
         self.set_label_signal.connect(self.set_label_slot)
         self.sleeper = queue.Queue()
-        if not user_cancel:
+        if not cancel:
             self.t = threading.Thread(target=self.send_all, daemon=True)
             self.t.start()
         else:
@@ -320,6 +324,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
                 '''Normal course of events, we slept for timeout seconds'''
                 return True
         self.tu.t0 = t0 = time.time()
+        ct, err_ct = 0, 0
         for i, t in enumerate(self.times):
             def time_left():
                 return (t0 + t) - time.time()
@@ -341,15 +346,20 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
             err = self.send_tx(coin)
             if not err:
                 self.tu.sent_utxos[name] = time.time()
+                ct += 1
             else:
                 self.tu.failed_utxos[name] = err
+                err_ct += 1
             self.tu.sending = None
             self.tu.update_sig.emit()  # have the widget immediately show "Sent or "Failed"
         # Emit a signal which will end up calling switch_signal_slot
         # in the main thread; we need to do this because we must now update
         # the GUI, and we cannot update the GUI in non-main-thread
         # See issue #10
-        self.switch_signal.emit()
+        if err_ct:
+            self.done_signal.emit(_("Transferred {num} coins successfully, {failures} coins failed").format(num=ct, failures=err_ct))
+        else:
+            self.done_signal.emit(_("Transferred {num} coins successfully").format(num=ct))
 
     def clean_up(self):
         if self.recipient_wallet:
@@ -366,6 +376,10 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         ''' Runs in GUI (main) thread '''
         self.clean_up()
         self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None)
+
+    def done_slot(self, msg):
+        self.abort_but.setText(_("Back"))
+        self.show_message(msg)
 
     def send_tx(self, coin: dict) -> str:
         ''' Returns the failure reason as a string on failure, or 'None'
