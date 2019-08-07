@@ -82,6 +82,9 @@ class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
 
         vbox.addStretch(1)
 
+    def filter(self, *args):
+        ''' This is here because searchable_list must define a filter method '''
+
     def showEvent(self, e):
         super().showEvent(e)
         if not self.network and self.isEnabled():
@@ -301,6 +304,9 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
             self.setDisabled(True)
             # fire the switch signal as soon as we return to the event loop
             QTimer.singleShot(0, self.switch_signal)
+
+    def filter(self, *args):
+        ''' This is here because searchable_list must define a filter method '''
 
     def diagnostic_name(self):
         return "InterWalletTransfer.Transfer"
