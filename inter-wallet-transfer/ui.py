@@ -7,9 +7,10 @@ from electroncash_gui.qt.util import MessageBoxMixin, MyTreeWidget
 from electroncash import keystore
 from electroncash.wallet import Standard_Wallet
 from electroncash.storage import WalletStorage
+from electroncash.keystore import Hardware_KeyStore
 from electroncash_gui.qt.util import *
 from electroncash.transaction import Transaction, TYPE_ADDRESS
-from electroncash.util import PrintError, print_error, age, Weak
+from electroncash.util import PrintError, print_error, age, Weak, InvalidPassword
 import time, datetime, random, threading, tempfile, string, os, queue
 from enum import IntEnum
 
@@ -42,22 +43,32 @@ class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
         vbox = QVBoxLayout()
         self.setLayout(vbox)
         self.local_xpub = self.wallet.get_master_public_keys()
-        l = QLabel(_("Master Public Key") + " of this wallet. It is used to generate all of your addresses.: ")
-        l2 = QLabel(self.local_xpub[0])
+        l = QLabel(_("Master Public Key") + _(" of this wallet (used to generate all of your addresses): "))
+        l2 = QLabel((self.local_xpub and self.local_xpub[0]) or _("This wallet is <b>non-deterministic</b> and cannot be used as a transfer destination."))
         vbox.addWidget(l)
         vbox.addWidget(l2)
         l2.setTextInteractionFlags(Qt.TextSelectableByMouse)
         l = QLabel(_("Master Public Key") + " of the wallet you want to transfer your funds to:")
+        disabled = False
+        if self.wallet.is_watching_only():
+            l.setText(_("This wallet is <b>watching-only</b> and cannot be used as a transfer source."))
+            disabled = True
+        elif any([isinstance(k, Hardware_KeyStore) for k in self.wallet.get_keystores()]):
+            l.setText(_("This wallet is a <b>hardware wallet</b> and cannot be used as a transfer source."))
+            disabled = True
         vbox.addWidget(l)
         self.xpubkey=None
         self.xpubkey_wid = QLineEdit()
         self.xpubkey_wid.textEdited.connect(self.transfer_changed)
+        self.xpubkey_wid.setDisabled(disabled)
         vbox.addWidget(self.xpubkey_wid)
         l = QLabel(_("How long the transfer should take (in whole hours): "))
         vbox.addWidget(l)
+        l.setDisabled(disabled)
         self.time_e = QLineEdit()
         self.time_e.setMaximumWidth(70)
         self.time_e.textEdited.connect(self.transfer_changed)
+        self.time_e.setDisabled(disabled)
         hbox = QHBoxLayout()
         vbox.addLayout(hbox)
         hbox.addWidget(self.time_e)
@@ -68,7 +79,11 @@ class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
         self.transfer_button.clicked.connect(self.transfer)
         vbox.addWidget(self.transfer_button)
         self.transfer_button.setDisabled(True)
+
         vbox.addStretch(1)
+
+    def filter(self, *args):
+        ''' This is here because searchable_list must define a filter method '''
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -232,6 +247,7 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
 class Transfer(MessageBoxMixin, PrintError, QWidget):
 
     switch_signal = pyqtSignal()
+    done_signal = pyqtSignal(str)
     set_label_signal = pyqtSignal(str, str)
 
     def __init__(self, parent, plugin, wallet_name, recipient_wallet, hours, password):
@@ -241,17 +257,31 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         self.password = password
         self.main_window = parent
         self.wallet = parent.wallet
+        self.recipient_wallet = recipient_wallet
 
-        if self.wallet.has_password():
+        cancel = False
+
+        self.utxos = self.wallet.get_spendable_coins(None, parent.config)
+        if not self.utxos:
+            self.main_window.show_message(_("No coins were found in this wallet; cannot proceed with transfer."))
+            cancel = True
+        elif self.wallet.has_password():
             self.main_window.show_error(_(
                 "Inter-Wallet Transfer plugin requires the password. "
                 "It will be sending transactions from this wallet at a random time without asking for confirmation."))
-            self.password = self.main_window.password_dialog()
-            if not self.password:
-                return
+            while True:
+                # keep trying the password until it's valid or user cancels
+                self.password = self.main_window.password_dialog()
+                if not self.password:
+                    # user cancel
+                    cancel = True
+                    break
+                try:
+                    self.wallet.check_password(self.password)
+                    break  # password was good, break out of loop
+                except InvalidPassword as e:
+                    self.show_warning(str(e))  # show error, keep looping
 
-        self.recipient_wallet = recipient_wallet
-        self.utxos = self.wallet.get_spendable_coins(None, parent.config)
         random.shuffle(self.utxos)
         self.times = self.randomize_times(hours)
         self.tu = TransferringUTXO(parent, self)
@@ -259,14 +289,24 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         self.setLayout(vbox)
         vbox.addWidget(self.tu)
         self.tu.update()
-        b = QPushButton(_("Abort"))
+        self.abort_but = b = QPushButton(_("Abort"))
         b.clicked.connect(self.abort)
         vbox.addWidget(b)
         self.switch_signal.connect(self.switch_signal_slot)
+        self.done_signal.connect(self.done_slot)
         self.set_label_signal.connect(self.set_label_slot)
         self.sleeper = queue.Queue()
-        self.t = threading.Thread(target=self.send_all, daemon=True)
-        self.t.start()
+        if not cancel:
+            self.t = threading.Thread(target=self.send_all, daemon=True)
+            self.t.start()
+        else:
+            self.t = None
+            self.setDisabled(True)
+            # fire the switch signal as soon as we return to the event loop
+            QTimer.singleShot(0, self.switch_signal)
+
+    def filter(self, *args):
+        ''' This is here because searchable_list must define a filter method '''
 
     def diagnostic_name(self):
         return "InterWalletTransfer.Transfer"
@@ -290,6 +330,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
                 '''Normal course of events, we slept for timeout seconds'''
                 return True
         self.tu.t0 = t0 = time.time()
+        ct, err_ct = 0, 0
         for i, t in enumerate(self.times):
             def time_left():
                 return (t0 + t) - time.time()
@@ -311,30 +352,40 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
             err = self.send_tx(coin)
             if not err:
                 self.tu.sent_utxos[name] = time.time()
+                ct += 1
             else:
                 self.tu.failed_utxos[name] = err
+                err_ct += 1
             self.tu.sending = None
             self.tu.update_sig.emit()  # have the widget immediately show "Sent or "Failed"
         # Emit a signal which will end up calling switch_signal_slot
         # in the main thread; we need to do this because we must now update
         # the GUI, and we cannot update the GUI in non-main-thread
         # See issue #10
-        self.switch_signal.emit()
+        if err_ct:
+            self.done_signal.emit(_("Transferred {num} coins successfully, {failures} coins failed").format(num=ct, failures=err_ct))
+        else:
+            self.done_signal.emit(_("Transferred {num} coins successfully").format(num=ct))
 
     def clean_up(self):
         if self.recipient_wallet:
             self.recipient_wallet.stop_threads()
-        self.tu.wallet = None
         self.recipient_wallet = None
-        if self.tu.timer:
-            self.tu.timer.stop()
-            self.tu.timer.deleteLater()
-            self.tu.timer = None
+        if self.tu:
+            self.tu.wallet = None
+            if self.tu.timer:
+                self.tu.timer.stop()
+                self.tu.timer.deleteLater()
+                self.tu.timer = None
 
     def switch_signal_slot(self):
         ''' Runs in GUI (main) thread '''
         self.clean_up()
         self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None)
+
+    def done_slot(self, msg):
+        self.abort_but.setText(_("Back"))
+        self.show_message(msg)
 
     def send_tx(self, coin: dict) -> str:
         ''' Returns the failure reason as a string on failure, or 'None'
@@ -359,7 +410,13 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         # create the tx again, this time with the real fee
         outputs = [(recipient_address.kind, recipient_address, coin['value'] - fee)]
         tx = Transaction.from_io(inputs, outputs, locktime=self.wallet.get_local_height(), **kwargs)
-        self.wallet.sign_transaction(tx, self.password)
+        try:
+            self.wallet.sign_transaction(tx, self.password)
+        except InvalidPassword as e:
+            return str(e)
+        except Exception as e:
+            return _("Unspecified failure")
+
         self.set_label_signal.emit(tx.txid(),
             _("Inter-Wallet Transfer {amount} -> {address}").format(
                 amount = self.main_window.format_amount(coin['value']) + " " + self.main_window.base_unit(),
@@ -381,7 +438,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         self.switch_signal.emit()
 
     def kill_join(self):
-        if self.t.is_alive():
+        if self.t and self.t.is_alive():
             self.sleeper.put(None)  # notify thread to wake up and exit
             if threading.current_thread() is not self.t:
                 self.t.join(timeout=2.5)  # wait around a bit for it to die but give up if this takes too long
