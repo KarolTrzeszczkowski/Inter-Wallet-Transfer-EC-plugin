@@ -21,6 +21,7 @@ from electroncash_gui.qt import ElectrumWindow
 from electroncash_gui.qt.util import *
 from electroncash.transaction import Transaction
 from electroncash.util import PrintError, print_error, age, Weak, InvalidPassword
+from electroncash.wallet import Multisig_Wallet
 
 
 def _get_name(utxo) -> str:
@@ -68,6 +69,12 @@ class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
             disabled = True
         elif any([isinstance(k, Hardware_KeyStore) for k in self.wallet.get_keystores()]):
             l.setText(_("This wallet is a <b>hardware wallet</b> and cannot be used as a transfer source."))
+            disabled = True
+        elif ((hasattr(self.wallet, 'is_multisig') and self.wallet.is_multisig())
+                or isinstance(self.wallet, Multisig_Wallet)):
+            l.setText(_("This wallet is a <b>multisig wallet</b> and cannot be used as a transfer source."))
+            # MultiSig wallet xpub keys are not useful and don't work. Hide the key.
+            l2.setText(_("This wallet is a <b>multisig wallet</b> and cannot be used as a transfer destination."))
             disabled = True
         vbox.addWidget(l)
         self.xpubkey = None
