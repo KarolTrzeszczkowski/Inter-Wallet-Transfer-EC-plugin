@@ -1,30 +1,42 @@
+
+import os
+import queue
+import random
+import string
+import tempfile
+import threading
+import time
+from enum import IntEnum
+
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 
 from electroncash.i18n import _
-from electroncash_gui.qt.util import MessageBoxMixin, MyTreeWidget
 from electroncash import keystore
 from electroncash.wallet import Standard_Wallet
 from electroncash.storage import WalletStorage
 from electroncash.keystore import Hardware_KeyStore
+from electroncash_gui.qt import ElectrumWindow
 from electroncash_gui.qt.util import *
-from electroncash.transaction import Transaction, TYPE_ADDRESS
+from electroncash.transaction import Transaction
 from electroncash.util import PrintError, print_error, age, Weak, InvalidPassword
-import time, datetime, random, threading, tempfile, string, os, queue
-from enum import IntEnum
 
-def get_name(utxo) -> str:
+
+def _get_name(utxo) -> str:
     return "{}:{}".format(utxo['prevout_hash'], utxo['prevout_n'])
+
 
 class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
 
-    def __init__(self, parent, plugin, wallet_name, recipient_wallet=None, time=None, password=None):
+    def __init__(self, parent: ElectrumWindow, plugin, wallet_name, recipient_wallet=None, time=None, password=None):
         QWidget.__init__(self, parent)
+        assert isinstance(parent, ElectrumWindow)
         self.password = password
         self.wallet = parent.wallet
-        self.utxos = self.wallet.get_spendable_coins(None, parent.config)
-        random.shuffle(self.utxos)  # randomize the coins' order
+        self.utxos = []  # populated by self.refresh_utxos() below
+        self.weakWindow = Weak.ref(parent)  # grab a weak reference to the ElectrumWindow
+        self.refresh_utxos()  # sets self.utxos
         for x in range(10):
             name = 'tmp_wo_wallet' + ''.join(random.choices(string.ascii_letters + string.digits, k=10))
             self.file = os.path.join(tempfile.gettempdir(), name)
@@ -33,9 +45,9 @@ class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
         else:
             raise RuntimeError('Could not find a unique temp file in tmp directory', tempfile.gettempdir())
         self.tmp_pass = ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
-        self.storage=None
-        self.recipient_wallet=None
-        self.keystore=None
+        self.storage = None
+        self.recipient_wallet = None
+        self.keystore = None
         self.plugin = plugin
         self.network = parent.network
         self.wallet_name = wallet_name
@@ -44,7 +56,8 @@ class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
         self.setLayout(vbox)
         self.local_xpub = self.wallet.get_master_public_keys()
         l = QLabel(_("Master Public Key") + _(" of this wallet (used to generate all of your addresses): "))
-        l2 = QLabel((self.local_xpub and self.local_xpub[0]) or _("This wallet is <b>non-deterministic</b> and cannot be used as a transfer destination."))
+        l2 = QLabel((self.local_xpub and self.local_xpub[0])
+                    or _("This wallet is <b>non-deterministic</b> and cannot be used as a transfer destination."))
         vbox.addWidget(l)
         vbox.addWidget(l2)
         l2.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -57,7 +70,7 @@ class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
             l.setText(_("This wallet is a <b>hardware wallet</b> and cannot be used as a transfer source."))
             disabled = True
         vbox.addWidget(l)
-        self.xpubkey=None
+        self.xpubkey = None
         self.xpubkey_wid = QLineEdit()
         self.xpubkey_wid.textEdited.connect(self.transfer_changed)
         self.xpubkey_wid.setDisabled(disabled)
@@ -75,26 +88,42 @@ class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
         self.speed = QLabel()
         hbox.addWidget(self.speed)
         hbox.addStretch(1)
+        hbox2 = QHBoxLayout()
+        hbox2.addStretch(1)
         self.transfer_button = QPushButton(_("Transfer"))
         self.transfer_button.clicked.connect(self.transfer)
-        vbox.addWidget(self.transfer_button)
+        self.transfer_button.setMinimumWidth(200)
+        hbox2.addWidget(self.transfer_button)
+        hbox2.addStretch(1)
+        vbox.addLayout(hbox2)
         self.transfer_button.setDisabled(True)
 
         vbox.addStretch(1)
 
+        if hasattr(parent, 'history_updated_signal'):
+            # So that we get told about when new coins come in, and the UI updates itself
+            parent.history_updated_signal.connect(self.refresh_utxos)
+            parent.history_updated_signal.connect(self.transfer_changed)
+
+    def refresh_utxos(self):
+        parent = self.weakWindow()
+        if parent:
+            self.utxos = self.wallet.get_spendable_coins(None, parent.config)
+            random.shuffle(self.utxos)  # randomize the coins' order
+
     def filter(self, *args):
-        ''' This is here because searchable_list must define a filter method '''
+        """This is here because searchable_list must define a filter method"""
 
     def showEvent(self, e):
         super().showEvent(e)
         if not self.network and self.isEnabled():
-            self.show_warning(_("The Inter-Wallet Transfer plugin cannot function in offline mode. Restart Electron Cash in online mode to proceed."))
+            self.show_warning(_("The Inter-Wallet Transfer plugin cannot function in offline mode. "
+                                "Restart Electron Cash in online mode to proceed."))
             self.setDisabled(True)
-
 
     @staticmethod
     def delete_temp_wallet_file(file):
-        ''' deletes the wallet file '''
+        """deletes the wallet file"""
         if file and os.path.exists(file):
             try:
                 os.remove(file)
@@ -115,7 +144,8 @@ class LoadRWallet(MessageBoxMixin, PrintError, QWidget):
         # otherwise the temp file will be auto-cleaned on app exit or
         # on the recepient_wallet object's destruction (when refct drops to 0)
         Weak.finalize(self.recipient_wallet, self.delete_temp_wallet_file, self.file)
-        self.plugin.switch_to(Transfer, self.wallet_name, self.recipient_wallet, float(self.time_e.text()), self.password)
+        self.plugin.switch_to(Transfer, self.wallet_name, self.recipient_wallet, float(self.time_e.text()),
+                              self.password)
 
     def transfer_changed(self):
         try:
@@ -194,7 +224,7 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
     def _recalc_times(self, times):
         if self.t0_last != self.t0:
             now = self.t0  # t0 is updated by thread as the actual start time
-            self.times = [ time.localtime(now + s) for s in times ]
+            self.times = [time.localtime(now + s) for s in times]
             self.times_secs = times
             self.t0_last = now
 
@@ -208,7 +238,7 @@ class TransferringUTXO(MessageBoxMixin, PrintError, MyTreeWidget):
         for i, u in enumerate(self.utxos):
             address = u['address'].to_ui_string()
             value = self.main_window.format_amount(u['value'], whitespaces=True) + " " + base_unit
-            name = get_name(u)
+            name = _get_name(u)
             ts = self.sent_utxos.get(name)
             icon = None
             when_font = None
@@ -306,13 +336,13 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
             QTimer.singleShot(0, self.switch_signal)
 
     def filter(self, *args):
-        ''' This is here because searchable_list must define a filter method '''
+        """This is here because searchable_list must define a filter method"""
 
     def diagnostic_name(self):
         return "InterWalletTransfer.Transfer"
 
     def randomize_times(self, hours):
-        times = [random.randint(0,int(hours*3600)) for t in range(len(self.utxos))]
+        times = [random.randint(0, int(hours*3600)) for t in range(len(self.utxos))]
         times.insert(0, 0)  # first time is always immediate
         times.sort()
         del times[-1]  # since we inserted 0 at the beginning
@@ -320,7 +350,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         return times
 
     def send_all(self):
-        ''' Runs in a thread '''
+        """Runs in a thread"""
         def wait(timeout=1.0) -> bool:
             try:
                 self.sleeper.get(timeout=timeout)
@@ -339,7 +369,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
                     # abort signalled
                     return
             coin = self.utxos.pop(0)
-            name = get_name(coin)
+            name = _get_name(coin)
             self.tu.sending = name
             self.tu.update_sig.emit()  # have the widget immediately display "Processing"
             while not self.recipient_wallet.is_up_to_date():
@@ -363,7 +393,8 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         # the GUI, and we cannot update the GUI in non-main-thread
         # See issue #10
         if err_ct:
-            self.done_signal.emit(_("Transferred {num} coins successfully, {failures} coins failed").format(num=ct, failures=err_ct))
+            self.done_signal.emit(_("Transferred {num} coins successfully, {failures} coins failed")
+                                  .format(num=ct, failures=err_ct))
         else:
             self.done_signal.emit(_("Transferred {num} coins successfully").format(num=ct))
 
@@ -379,7 +410,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
                 self.tu.timer = None
 
     def switch_signal_slot(self):
-        ''' Runs in GUI (main) thread '''
+        """Runs in GUI (main) thread"""
         self.clean_up()
         self.plugin.switch_to(LoadRWallet, self.wallet_name, None, None, None)
 
@@ -388,13 +419,14 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         self.show_message(msg)
 
     def send_tx(self, coin: dict) -> str:
-        ''' Returns the failure reason as a string on failure, or 'None'
-        on success. '''
+        """Returns the failure reason as a string on failure, or 'None'
+        on success."""
         self.wallet.add_input_info(coin)
         inputs = [coin]
         recipient_address = self.recipient_wallet and self.recipient_wallet.get_unused_address()
         if not recipient_address:
-            self.print_error("Could not get recipient_address; recipient wallet may have been cleaned up, aborting send_tx")
+            self.print_error("Could not get recipient_address; recipient wallet may have been cleaned up, "
+                             "aborting send_tx")
             return _("Unspecified failure")
         outputs = [(recipient_address.kind, recipient_address, coin['value'])]
         kwargs = {}
@@ -414,13 +446,13 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
             self.wallet.sign_transaction(tx, self.password)
         except InvalidPassword as e:
             return str(e)
-        except Exception as e:
+        except Exception:
             return _("Unspecified failure")
 
         self.set_label_signal.emit(tx.txid(),
             _("Inter-Wallet Transfer {amount} -> {address}").format(
-                amount = self.main_window.format_amount(coin['value']) + " " + self.main_window.base_unit(),
-                address = recipient_address.to_ui_string()
+                amount=self.main_window.format_amount(coin['value']) + " " + self.main_window.base_unit(),
+                address=recipient_address.to_ui_string()
         ))
         try:
             self.main_window.network.broadcast_transaction2(tx)
@@ -430,7 +462,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         return None
 
     def set_label_slot(self, txid: str, label: str):
-        ''' Runs in GUI (main) thread '''
+        """Runs in GUI (main) thread"""
         self.wallet.set_label(txid, label)
 
     def abort(self):

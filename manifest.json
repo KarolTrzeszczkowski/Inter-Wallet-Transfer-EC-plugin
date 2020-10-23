@@ -1,6 +1,6 @@
 {
     "display_name": "Inter-Wallet Transfer",
-    "version": "1.2",
+    "version": "1.3",
     "description": "A plugin, that sends your coins to another wallet one by one, every time to a fresh address.",
     "project_url": "https://github.com/KarolTrzeszczkowski/Inter-Wallet-Transfer-EC-plugin/",
     "minimum_ec_version": "4.0",

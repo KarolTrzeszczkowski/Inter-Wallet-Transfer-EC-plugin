@@ -1,11 +1,12 @@
 from PyQt5 import QtGui
 from PyQt5 import QtCore
 
-import electroncash.version, os
 from electroncash.i18n import _
 from electroncash.plugins import BasePlugin, hook
 from electroncash_gui.qt.util import destroyed_print_error
 from electroncash.util import finalization_print_error
+
+from . import ui
 
 
 class Plugin(BasePlugin):
@@ -28,7 +29,6 @@ class Plugin(BasePlugin):
 
     def description(self):
         return _("Plugin Inter-Wallet Transfer")
-
 
     def on_close(self):
         """
@@ -70,14 +70,12 @@ class Plugin(BasePlugin):
         self.add_ui_for_wallet(wallet_name, window)
         self.refresh_ui_for_wallet(wallet_name)
 
-
     @hook
     def close_wallet(self, wallet):
         wallet_name = wallet.basename()
         window = self.wallet_windows[wallet_name]
         del self.wallet_windows[wallet_name]
         self.remove_ui_for_wallet(wallet_name, window)
-
 
     @staticmethod
     def _get_icon() -> QtGui.QIcon:
@@ -89,8 +87,7 @@ class Plugin(BasePlugin):
         return icon
 
     def add_ui_for_wallet(self, wallet_name, window):
-        from .ui import LoadRWallet
-        l = LoadRWallet(window, self, wallet_name)
+        l = ui.LoadRWallet(window, self, wallet_name)
         tab = window.create_list_tab(l)
         self.lw_tabs[wallet_name] = tab
         self.lw_tab[wallet_name] = l
