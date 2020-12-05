@@ -379,7 +379,7 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
             name = _get_name(coin)
             self.tu.sending = name
             self.tu.update_sig.emit()  # have the widget immediately display "Processing"
-            while not self.recipient_wallet.is_up_to_date():
+            while not self.recipient_wallet.is_fully_settled_down():
                 ''' We must wait for the recipient wallet to finish synching...
                 Ugly hack.. :/ '''
                 self.print_error("Receiving wallet is not yet up-to-date... waiting... ")
@@ -430,7 +430,8 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         on success."""
         self.wallet.add_input_info(coin)
         inputs = [coin]
-        recipient_address = self.recipient_wallet and self.recipient_wallet.get_unused_address()
+        recipient_address = self.recipient_wallet and self.recipient_wallet.get_unused_address(frozen_ok=False)
+        self.print_error("recipient_address: ", recipient_address)
         if not recipient_address:
             self.print_error("Could not get recipient_address; recipient wallet may have been cleaned up, "
                              "aborting send_tx")
@@ -466,6 +467,8 @@ class Transfer(MessageBoxMixin, PrintError, QWidget):
         except Exception as e:
             self.print_error("Error broadcasting tx:", repr(e))
             return (e.args and e.args[0]) or _("Unspecified failure")
+        self.recipient_wallet.frozen_addresses.add(recipient_address)
+        self.recipient_wallet.create_new_address(False)
         return None
 
     def set_label_slot(self, txid: str, label: str):
